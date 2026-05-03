@@ -1,148 +1,102 @@
-import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
-
 import streamlit as st
-from transformers import AutoModelForCausalLM, AutoProcessor, BitsAndBytesConfig
-import torch
+import json
 from PIL import Image
+from model import load_model, run_inference
+from utils import generate_caption, build_prompt, extract_json_from_response
 
-# Sayfa Yapılandırması
-st.set_page_config(page_title="🌱 Smart Agri-Assistant", page_icon="📸", layout="wide")
+st.set_page_config(page_title="Smart Agri Assistant", page_icon="🌱", layout="centered")
 
-# CSS Stilleri
 st.markdown("""
-    <style>
-    .main { background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%); }
-    .stButton>button { 
-        width: 100%; 
-        border-radius: 10px; 
-        height: 3em; 
-        background-color: #2e7d32; 
-        color: white; 
-        font-weight: bold; 
-        font-size: 16px;
-    }
-    .diagnosis-card { 
-        background-color: #f1f8e9; 
-        color: #1b5e20; 
-        padding: 25px; 
-        border-radius: 12px; 
-        border-left: 8px solid #2e7d32; 
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1); 
-        margin-top: 20px;
-        font-size: 16px;
-        line-height: 1.6;
-    }
-    </style>
+<style>
+.stApp {
+    background-color: #f4f9f4;
+}
+.title {
+    color: #2e7d32;
+    text-align: center;
+}
+</style>
 """, unsafe_allow_html=True)
 
-# ÇOK DİLLİ SÖZLÜK
-LANGUAGES = {
-    "TR": {
-        "title": "📸 Akıllı Tarım Asistanı",
-        "desc": "Bitkinizin hastalıklı veya sorunlu bölgesinin fotoğrafını yükleyin, asistanımız analiz etsin.",
-        "upload": "Bitki Fotoğrafı Yükle",
-        "note": "Eklemek istediğiniz bir not var mı? (Örn: Domates, 2 haftadır böyle)",
-        "analyze": "🔍 Fotoğrafı Analiz Et",
-        "loading": "Yapay Zeka fotoğrafı inceliyor, lütfen bekleyin...",
-        "prompt": "Sen uzman bir ziraat mühendisisin. Bu bitki fotoğrafını dikkatlice incele. Gördüğün hastalığa mantıklı bir teşhis koy ve Türkçe olarak profesyonel bir tedavi önerisi sun.",
-        "farmer_note": "Çiftçinin Notu",
-        "result": "🧑‍🌾 Teşhis ve Öneri:"
-    },
+st.markdown("<h1 class='title'>🌱 Smart Agri Assistant</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center;'>AI-powered plant disease diagnosis using Gemma 4</p>", unsafe_allow_html=True)
+
+# Load model (cached to avoid reloading on every interaction)
+@st.cache_resource
+def get_model_and_tokenizer():
+    return load_model()
+
+# Language selector
+lang = st.selectbox("Language / Dil", ["EN", "TR"])
+
+# Language text dictionary
+text_ui = {
     "EN": {
-        "title": "📸 Smart Agri-Assistant",
-        "desc": "Upload a photo of your plant's diseased or problematic area for our AI to analyze.",
-        "upload": "Upload Plant Photo",
-        "note": "Any additional notes? (e.g., Tomato, it's been like this for 2 weeks)",
-        "analyze": "🔍 Analyze Photo",
-        "loading": "AI is analyzing the photo, please wait...",
-        "prompt": "You are an expert agricultural engineer. Carefully examine this plant photo. Provide a logical diagnosis for the disease you see and offer a professional treatment recommendation in English.",
-        "farmer_note": "Farmer's Note",
-        "result": "🧑‍🌾 Diagnosis & Recommendation:"
+        "upload": "Upload a picture of the diseased plant leaf",
+        "analyze": "🔍 Analyze Plant",
+        "loading": "Analyzing image and generating diagnosis...",
+        "json_title": "### Structured Diagnosis (JSON)",
+        "result_title": "### Formatted Diagnosis",
+        "disease": "Disease",
+        "confidence": "Confidence",
+        "symptoms": "Symptoms",
+        "treatment": "Treatment",
+        "severity": "Severity"
     },
-    "AR": {
-        "title": "📸 مساعد الزراعة الذكي",
-        "desc": "قم بتحميل صورة للمنطقة المريضة أو التي بها مشكلة في نباتك ليقوم الذكاء الاصطناعي بتحليلها.",
-        "upload": "تحميل صورة النبات",
-        "note": "أي ملاحظات إضافية؟ (مثال: طماطم، كانت هكذا منذ أسبوعين)",
-        "analyze": "🔍 تحليل الصورة",
-        "loading": "الذكاء الاصطناعي يقوم بتحليل الصورة، يرجى الانتظار...",
-        "prompt": "أنت مهندس زراعي خبير. افحص صورة هذا النبات بعناية. قدم تشخيصًا منطقيًا للمرض الذي تراه وقدم توصية علاجية احترافية باللغة العربية.",
-        "farmer_note": "ملاحظة المزارع",
-        "result": "🧑‍🌾 التشخيص والتوصية:"
+    "TR": {
+        "upload": "Hasta bitki yaprağının bir fotoğrafını yükleyin",
+        "analyze": "🔍 Bitkiyi Analiz Et",
+        "loading": "Görüntü inceleniyor ve teşhis oluşturuluyor...",
+        "json_title": "### Yapılandırılmış Teşhis (JSON)",
+        "result_title": "### Formatlanmış Teşhis",
+        "disease": "Hastalık",
+        "confidence": "Güvenilirlik",
+        "symptoms": "Belirtiler",
+        "treatment": "Tedavi",
+        "severity": "Ciddiyet"
     }
 }
+ui = text_ui[lang]
 
-@st.cache_resource
-def load_model():
-    quantization_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.bfloat16
-    )
-    
-    model_name = "unsloth/gemma-3-4b-it" 
-    
-    base = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        quantization_config=quantization_config,
-        device_map="auto"
-    )
-    
-    processor = AutoProcessor.from_pretrained(model_name)
-    
-    model_vocab_size = base.get_input_embeddings().weight.shape[0]
-    if len(processor.tokenizer) > model_vocab_size:
-        base.resize_token_embeddings(len(processor.tokenizer))
-        
-    base.eval()
-    return base, processor
-
-model, processor = load_model()
-
-# Arayüz Elemanları
-lang_choice = st.selectbox("🌐 Language / Dil / لغة", ["TR", "EN", "AR"])
-L = LANGUAGES[lang_choice]
-
-st.title(L["title"])
-st.write(L["desc"])
-
-uploaded_file = st.file_uploader(L["upload"], type=["jpg", "jpeg", "png"])
-user_note = st.text_input(L["note"])
+# Image uploader
+uploaded_file = st.file_uploader(ui["upload"], type=["jpg", "png", "jpeg"])
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file).convert("RGB")
-    st.image(image, caption="Uploaded Photo", width=400)
-
-    if st.button(L["analyze"]):
-        with st.spinner(L["loading"]):
-            prompt_text = L["prompt"]
-            if user_note:
-                prompt_text += f"\n{L['farmer_note']}: {user_note}"
-
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image"},
-                        {"type": "text", "text": prompt_text}
-                    ]
-                }
-            ]
-            
-            prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            inputs = processor(text=prompt, images=image, return_tensors="pt")
-            inputs = {k: v.to(model.device) for k, v in inputs.items()}
-            
-            with torch.no_grad():
-                outputs = model.generate(
-                    **inputs, 
-                    max_new_tokens=300,
-                    temperature=0.3, 
-                    top_p=0.9,
-                    do_sample=True
-                )
-            
-            input_length = inputs['input_ids'].shape[1]
-            result = processor.tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
-            
-            st.markdown(f"<div class='diagnosis-card'><strong>{L['result']}</strong><br><br>{result.strip()}</div>", unsafe_allow_html=True)
+    st.image(image, caption="Uploaded Image", use_container_width=True)
+    
+    if st.button(ui["analyze"], type="primary"):
+        with st.spinner(ui["loading"]):
+            try:
+                # 1. Load Model
+                model, tokenizer = get_model_and_tokenizer()
+                
+                # 2. Image to Caption (Placeholder logic as requested)
+                caption = generate_caption(image)
+                
+                # 3. Build Prompt (Zero-shot instruction for JSON)
+                prompt = build_prompt(caption, language=lang)
+                
+                # 4. Run Inference
+                raw_response = run_inference(model, tokenizer, prompt)
+                
+                # 5. Extract JSON Output
+                result_json = extract_json_from_response(raw_response)
+                
+                # Output Results
+                st.markdown(ui["json_title"])
+                st.json(result_json)
+                
+                if "error" not in result_json:
+                    st.markdown(ui["result_title"])
+                    st.success(f"**{ui['disease']}**: {result_json.get('disease', 'N/A')}")
+                    st.info(f"**{ui['confidence']}**: {result_json.get('confidence', 'N/A')}")
+                    st.warning(f"**{ui['symptoms']}**: {result_json.get('symptoms', 'N/A')}")
+                    st.error(f"**{ui['treatment']}**: {result_json.get('treatment', 'N/A')}")
+                    st.info(f"**{ui['severity']}**: {result_json.get('severity', 'N/A').upper()}")
+                else:
+                    st.error("Failed to parse the model output into valid JSON.")
+                    st.text(result_json.get("raw_output", ""))
+                    
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
