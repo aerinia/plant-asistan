@@ -1,2 +1,3 @@
 tarim-lora/
 *.safetensors
+.streamlit/

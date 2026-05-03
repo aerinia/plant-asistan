@@ -40,7 +40,7 @@ def load_model():
                 load_in_4bit=True,
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16
+                bnb_4bit_compute_dtype=torch.bfloat16  # float16 → bfloat16 (Gemma 4 requirement)
             )
             model = AutoModelForCausalLM.from_pretrained(
                 model_name,
@@ -58,37 +58,22 @@ def load_model():
 
 def run_inference(model, tokenizer, prompt):
     """
-    Runs the inference pipeline with the given prompt.
-    Forces deterministic generation by using a low temperature.
+    Executes real inference on the loaded model.
     """
-    messages = [
-        {"role": "user", "content": prompt}
-    ]
-    
-    try:
-        inputs = tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt"
-        )
-    except Exception:
-        # Fallback if no chat template is available
-        text_prompt = f"User: {prompt}\nAssistant:"
-        inputs = tokenizer(text_prompt, return_tensors="pt").input_ids
-        
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    inputs = inputs.to(device)
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     
     with torch.no_grad():
         outputs = model.generate(
-            inputs,
+            **inputs,
             max_new_tokens=512,
-            temperature=0.1,  # Low temperature for deterministic JSON structure
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id
+            use_cache=True,
+            do_sample=True,      # Required when using temperature/top_p
+            temperature=0.2,     # Low temperature keeps JSON format stable
+            top_p=0.9,
         )
-        
-    input_length = inputs.shape[1]
+    
+    # Sadece yeni üretilen token'ları çöz (prompt'u sil)
+    input_length = inputs["input_ids"].shape[1]
     response = tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
+    
     return response

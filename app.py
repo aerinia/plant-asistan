@@ -8,11 +8,8 @@ st.set_page_config(page_title="Smart Agri Assistant", page_icon="🌱", layout="
 
 st.markdown("""
 <style>
-.stApp {
-    background-color: #f4f9f4;
-}
 .title {
-    color: #2e7d32;
+    color: #4ade80;
     text-align: center;
 }
 </style>
